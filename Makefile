@@ -6,10 +6,13 @@ INCLUDE=-Iminisat -Iminisat/minisat/core -Iminisat/minisat/mtl -Iminisat/minisat
 
 all:	ic3
 
-ic3:	minisat/build/dynamic/lib/libminisat.so aiger/aiger.o Model.o clausebuf.o IC3.o main.o
+ic3:	minisat/build/dynamic/lib/libminisat.so aiger.o Model.o clausebuf.o IC3.o main.o
 	$(CXX) $(CFLAGS) $(INCLUDE) -o IC3 \
-		aiger/aiger.o Model.o clausebuf.o IC3.o main.o \
+		aiger.o Model.o clausebuf.o IC3.o main.o \
 		minisat/build/release/lib/libminisat.a
+
+aiger.o: aiger/aiger.c
+	$(CC) -g -O3 $(INCLUDE) aiger/aiger.c -c -o aiger.o
 
 .c.o:
 	$(CC) -g -O3 $(INCLUDE) $< -c
