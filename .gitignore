@@ -6,4 +6,6 @@ minisat/*
 *.txt
 inv.cnf
 minisat/*
-
+smt-switch_backup/
+minisat_backup/
+test/inv.cnf.bak
