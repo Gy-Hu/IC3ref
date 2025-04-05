@@ -1,0 +1,6 @@
+[submodule "minisat"]
+	path = minisat
+	url = https://github.com/agurfinkel/minisat.git
+[submodule "smt-switch"]
+	path = smt-switch
+	url = https://github.com/zhanghongce/smt-switch.git
