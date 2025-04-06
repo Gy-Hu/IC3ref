@@ -418,9 +418,23 @@ int main(int argc, char ** argv) {
                 
                 // Check if this invariant clause is a subset of the CTI literals
                 // A clause is a subset if all its literals appear in the CTI
+                // Ignoring polarity: both 2n and 2n+1 are considered the same variable
                 bool is_subset = true;
                 for (int lit : inv_clause) {
-                  if (std::find(aiger_literals.begin(), aiger_literals.end(), lit) == aiger_literals.end()) {
+                  unsigned int lit_base = lit - (lit % 2); // Get the even variant (ignore polarity)
+                  unsigned int lit_neg = lit_base + 1;     // Get the odd variant
+                  
+                  // Check if either variant of the literal exists in CTI literals
+                  bool found_lit = false;
+                  for (unsigned int aiger_lit : aiger_literals) {
+                    unsigned int aiger_base = aiger_lit - (aiger_lit % 2);
+                    if (aiger_base == lit_base) {
+                      found_lit = true;
+                      break;
+                    }
+                  }
+                  
+                  if (!found_lit) {
                     is_subset = false;
                     break;
                   }
