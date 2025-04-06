@@ -45,6 +45,30 @@ bool isSubset(const std::set<int>& subset, const std::set<int>& superset) {
     return std::includes(superset.begin(), superset.end(), subset.begin(), subset.end());
 }
 
+// Check if inv clause literals are subset of CTI clause literals with polarity consideration
+bool isClauseSubsetWithPolarity(const std::vector<int>& inv_clause, const std::vector<int>& cti_clause) {
+    // Convert CTI clause to a set for fast lookup
+    std::set<int> cti_literals;
+    for (int lit : cti_clause) {
+        cti_literals.insert(lit);
+        // Add both polarity versions for each variable to match Python implementation
+        // In this encoding: even numbers (2,4,6...) are positive literals, odd numbers (3,5,7...) are negative
+        if (lit % 2 == 0) { // Even number: positive literal (v1, v2, etc.)
+            cti_literals.insert(lit + 1); // Add negative version
+        } else { // Odd number: negative literal (~v1, ~v2, etc.)
+            cti_literals.insert(lit - 1); // Add positive version
+        }
+    }
+    
+    // Check if all literals in inv_clause are in cti_literals
+    for (int lit : inv_clause) {
+        if (cti_literals.find(lit) == cti_literals.end()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Calculate the number of literals in a clause
 size_t clauseSize(const std::string& clause_str) {
     size_t count = 1; // At least one literal
@@ -208,6 +232,11 @@ int main(int argc, char ** argv) {
       for (const auto& model : m) {
         // Extract literals from the model and create a clause
         std::vector<int> clause;
+        // Create a string representation of the CTI in original state format
+        std::string cti_state_str;
+        std::vector<std::string> state_vars;
+        std::vector<std::string> state_vals;
+        
         for (size_t i = 0; i < model.vars.size(); i++) {
           // Get variable ID (assuming it's a number in the variable name)
           std::string var_name = model.vars[i]->to_string();
@@ -216,6 +245,10 @@ int main(int argc, char ** argv) {
           // Extract numeric ID from variable name
           if (var_name.find("state") == 0) {
             var_id = std::stoi(var_name.substr(5));
+            
+            // Add to state variables and values arrays
+            state_vars.push_back(var_name);
+            state_vals.push_back(model.vals[i]->to_string() == "true" ? "1" : "0");
           } else if (var_name.find("v") == 0) {
             var_id = std::stoi(var_name.substr(1));
           }
@@ -236,6 +269,17 @@ int main(int argc, char ** argv) {
           clause.push_back(is_true ? var_id+1 : var_id);
         }
         
+        // Construct the CTI string in the format shown in the console output
+        for (size_t i = 0; i < state_vars.size(); i++) {
+          if (i > 0) cti_state_str += " ";
+          cti_state_str += state_vars[i];
+        }
+        cti_state_str += "\n";
+        for (size_t i = 0; i < state_vals.size(); i++) {
+          if (i > 0) cti_state_str += "       ";
+          cti_state_str += state_vals[i];
+        }
+        
         // Add clause if not empty
         if (!clause.empty()) {
           cti_clauses.clauses.push_back(clause);
@@ -249,6 +293,9 @@ int main(int argc, char ** argv) {
               clause_str += std::to_string(clause[i]);
             }
             
+            // Use CTI state string as the key in mapping instead of clause_str
+            std::string mapping_key = cti_state_str;
+            
             // Calculate CTI clause set representation
             std::set<int> cti_set = clauseToSet(clause);
             cti_clause_sets[clause_str] = cti_set;
@@ -257,42 +304,42 @@ int main(int argc, char ** argv) {
             min_subsets[clause_str] = std::vector<std::pair<std::string, size_t>>();
             
             // Bottom-up matching: find inv clauses that are subsets of variables in CTI clause
-            for (size_t i = 0; i < inv_clauses.size(); i++) {
+            // Stop at the first match (scanning from bottom up)
+            bool match_found = false;
+            for (int i = inv_clauses.size() - 1; i >= 0 && !match_found; i--) {
               const auto& inv_clause = inv_clauses[i];
               const auto& inv_clause_str = inv_clauses_str[i];
-              const auto& inv_set = inv_clause_sets[inv_clause_str];
               
-              // Check if inv clause is a subset of CTI clause
-              if (isSubset(inv_set, cti_set)) {
-                // Found subset, record its size
-                size_t size = inv_set.size();
-                min_subsets[clause_str].push_back(std::make_pair(inv_clause_str, size));
+              // Check with original set-based check
+              if (isSubset(inv_clause_sets[inv_clause_str], cti_set)) {
+                // Found subset, record it and stop searching
+                min_subsets[clause_str].push_back(std::make_pair(inv_clause_str, inv_clause_sets[inv_clause_str].size()));
+                match_found = true;
+              }
+              // Additional check with polarity if no match found yet
+              else if (!match_found && isClauseSubsetWithPolarity(inv_clause, clause)) {
+                // Found subset considering polarity, record it and stop searching
+                min_subsets[clause_str].push_back(std::make_pair(inv_clause_str, inv_clause.size()));
+                match_found = true;
               }
             }
             
-            // If subsets found, sort by size and keep only the smallest ones
+            // If subsets found, include all valid subsets, not just the smallest ones
             if (!min_subsets[clause_str].empty()) {
-              // Sort by size
+              // Sort by size for consistency (smaller clauses first)
               std::sort(min_subsets[clause_str].begin(), min_subsets[clause_str].end(), 
                   [](const std::pair<std::string, size_t>& a, const std::pair<std::string, size_t>& b) {
                     return a.second < b.second;
                   });
               
-              // Find the minimum size
-              size_t min_size = min_subsets[clause_str][0].second;
-              
-              // Keep only subsets with the minimum size
-              std::vector<std::string> smallest_subsets;
+              // Include all valid subsets, not just the smallest ones
+              std::vector<std::string> valid_subsets;
               for (const auto& subset : min_subsets[clause_str]) {
-                if (subset.second == min_size) {
-                  smallest_subsets.push_back(subset.first);
-                } else {
-                  break; // Since already sorted, once size not equal to min, all others won't be equal
-                }
+                valid_subsets.push_back(subset.first);
               }
               
-              // Update mapping with smallest subsets
-              mapping[clause_str] = smallest_subsets;
+              // Update mapping with all valid subsets, using CTI state string as key
+              mapping[mapping_key] = valid_subsets;
             }
           }
         }
@@ -308,11 +355,97 @@ int main(int argc, char ** argv) {
       if (generate_mapping) {
         std::ofstream json_file(mapping_output);
         if (json_file.is_open()) {
-          // Manually build simple JSON format
+          // Create mapping with actual AIGER latch IDs as keys
+          std::map<std::string, std::vector<std::string>> formatted_mapping;
+          
+          // Process each CTI model
+          for (const auto& model : m) {
+            // Vector to store transformed AIGER latch IDs with polarity
+            std::vector<unsigned int> aiger_literals;
+            std::string cti_state_description = "";
+            
+            // Process state variables - transform to AIGER latch literals
+            for (size_t i = 0; i < model.vars.size(); i++) {
+              std::string var_name = model.vars[i]->to_string();
+              bool is_true = (model.vals[i]->to_string() == "true");
+              
+              // Add to state description for debugging/logging
+              if (var_name.find("state") == 0) {
+                if (!cti_state_description.empty()) cti_state_description += " ";
+                cti_state_description += var_name + "=" + (is_true ? "1" : "0");
+              }
+              
+              // Map the state variable to its corresponding AIGER latch literal
+              if (var_name.find("state") == 0) {
+                // Extract state index
+                int state_idx = std::stoi(var_name.substr(5));
+                
+                // Check if it's a valid state variable
+                if (state_idx < aig->num_latches) {
+                  // Calculate AIGER latch literal (even number for positive)
+                  unsigned int aiger_latch_id = 2 * (1 + aig->num_inputs + state_idx);
+                  
+                  // Apply polarity based on state value:
+                  // If state is false (0), use odd number (negative literal)
+                  // If state is true (1), use even number (positive literal)
+                  unsigned int aiger_literal = is_true ? aiger_latch_id : aiger_latch_id + 1;
+                  
+                  // Add to our list of literals for this CTI
+                  aiger_literals.push_back(aiger_literal);
+                }
+              }
+            }
+            
+            // Sort the literals for consistency
+            std::sort(aiger_literals.begin(), aiger_literals.end());
+            
+            // Build the key for mapping (space-separated literals with polarity)
+            std::string aiger_key = "";
+            for (size_t i = 0; i < aiger_literals.size(); i++) {
+              if (i > 0) aiger_key += " ";
+              aiger_key += std::to_string(aiger_literals[i]);
+            }
+            
+            // Find match in invariant clauses (scanning from bottom up)
+            if (generate_mapping && framebuf != NULL && !aiger_literals.empty()) {
+              bool match_found = false;
+              std::string matching_inv = "";
+              
+              // Scan invariant clauses from bottom to top
+              for (int i = inv_clauses.size() - 1; i >= 0 && !match_found; i--) {
+                const auto& inv_clause = inv_clauses[i];
+                const auto& inv_clause_str = inv_clauses_str[i];
+                
+                // Check if this invariant clause is a subset of the CTI literals
+                // A clause is a subset if all its literals appear in the CTI
+                bool is_subset = true;
+                for (int lit : inv_clause) {
+                  if (std::find(aiger_literals.begin(), aiger_literals.end(), lit) == aiger_literals.end()) {
+                    is_subset = false;
+                    break;
+                  }
+                }
+                
+                if (is_subset) {
+                  matching_inv = inv_clause_str;
+                  match_found = true;
+                }
+              }
+              
+              // If we found a match, add to the mapping
+              if (match_found) {
+                std::vector<std::string> mapped_invs;
+                mapped_invs.push_back(matching_inv);
+                formatted_mapping[aiger_key] = mapped_invs;
+              }
+            }
+          }
+          
+          // Write out the formatted mapping
           json_file << "{\n";
           
           size_t count = 0;
-          for (const auto& map_entry : mapping) {
+          for (const auto& map_entry : formatted_mapping) {
             json_file << "  \"" << jsonEscape(map_entry.first) << "\": [";
             for (size_t i = 0; i < map_entry.second.size(); i++) {
               if (i > 0) json_file << ", ";
@@ -320,7 +453,7 @@ int main(int argc, char ** argv) {
             }
             json_file << "]";
             
-            if (++count < mapping.size()) {
+            if (++count < formatted_mapping.size()) {
               json_file << ",";
             }
             json_file << "\n";
@@ -328,7 +461,7 @@ int main(int argc, char ** argv) {
           
           json_file << "}\n";
           json_file.close();
-          std::cout << "Wrote mapping of " << mapping.size() << " CTI clauses to minimal invariant clause subsets in " << mapping_output << std::endl;
+          std::cout << "Wrote mapping of " << formatted_mapping.size() << " CTI clauses to invariant clause subsets in " << mapping_output << std::endl;
         } else {
           std::cerr << "Failed to open JSON mapping file for writing: " << mapping_output << std::endl;
         }
@@ -339,3 +472,4 @@ int main(int argc, char ** argv) {
   aiger_reset(aig);
   return 0;
 }
+
