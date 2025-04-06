@@ -15,6 +15,7 @@ void printHelpMessage (const char * argv0) {
     std::cout << "          -f inv.cnf : load frame for cex sampling\n" ;
     std::cout << "          -g graph   : dump graph to graph \n" ;
     std::cout << "          -i in.cnf out.cnf: load frame for filtering \n" ;
+    std::cout << "          -c output.cnf : generate CTIs and corresponding clauses\n" ;
     std::cout << "          -h : print help message \n" ;
 }
 
@@ -24,8 +25,10 @@ int main(int argc, char ** argv) {
   const char * framebuf = NULL;
   const char * dump_graph = NULL;
   const char * outframebuf = NULL;
+  const char * clause_output = NULL;
   bool sampling_cex = false;
   bool filtering_frame = false;
+  bool generate_clauses = false;
 
   if (argc > 1) {
     int idx = 1;
@@ -39,6 +42,10 @@ int main(int argc, char ** argv) {
         framebuf = argv[++idx];
         outframebuf = argv[++idx];
         filtering_frame = true;
+      }
+      else if (argv[idx] == std::string("-c")) {
+        clause_output = argv[++idx];
+        generate_clauses = true;
       }
       else if (argv[idx] == std::string("-h")) {
         printHelpMessage(argv[0]);
@@ -102,19 +109,57 @@ int main(int argc, char ** argv) {
   }
 
   if(sampling_cex) {
-    //  ClauseBuf buf;
-    //buf.from_file(framebuf);
-    // then sample for N models with clausebuf
-    // } else {
-    // random sampling
     TransitionSystem ts(aig, 0);
     std::vector<ctiModel> m;
     auto ret = sample_cti(ts, 100, m);
     std::cout << "Total samples: "<< ret << std::endl;
     // sample model: P /\ T /\ neg P'
+    
+    // If clause generation is requested, generate and save clauses
+    if (generate_clauses && ret > 0) {
+      ClauseBuf cti_clauses;
+      
+      // Generate clauses from CTI models
+      for (const auto& model : m) {
+        // Extract literals from the model and create a clause
+        std::vector<int> clause;
+        for (size_t i = 0; i < model.vars.size(); i++) {
+          // Get variable ID (assuming it's a number in the variable name)
+          std::string var_name = model.vars[i]->to_string();
+          int var_id = 0;
+          
+          // Extract numeric ID from variable name
+          if (var_name.find("state") == 0) {
+            var_id = std::stoi(var_name.substr(5));
+          } else if (var_name.find("v") == 0) {
+            var_id = std::stoi(var_name.substr(1));
+          }
+          
+          // Skip if var_id is 0
+          if (var_id == 0) continue;
+          
+          // Determine if the variable is true or false in the model
+          bool is_true = false;
+          if (model.vals[i]->to_string() == "true") {
+            is_true = true;
+          }
+          
+          // Add literal to clause (positive if true, negative if false)
+          clause.push_back(is_true ? var_id : -var_id);
+        }
+        
+        // Add clause if not empty
+        if (!clause.empty()) {
+          cti_clauses.clauses.push_back(clause);
+        }
+      }
+      
+      // Save clauses to output file
+      cti_clauses.dump(clause_output);
+      std::cout << "Wrote " << cti_clauses.clauses.size() << " CTI clauses to " << clause_output << std::endl;
+    }
   }
   
   aiger_reset(aig);
   return 0;
 }
-
