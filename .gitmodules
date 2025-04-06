@@ -4,3 +4,6 @@
 [submodule "smt-switch"]
 	path = smt-switch
 	url = https://github.com/zhanghongce/smt-switch.git
+[submodule "aiger"]
+	path = aiger
+	url = https://github.com/arminbiere/aiger.git
