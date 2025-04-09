@@ -14,24 +14,17 @@
 #include "clausebuf.h"
 #include "ts.h"
 
+// JSON for Modern C++
+#include "json.hpp"
+
 extern "C" {
 #include "aiger.h"
 }
 
-// Helper functions for AIGER literal conversion and clause processing
+// for convenience
+using json = nlohmann::json;
 
-// Simple JSON string escape function
-std::string jsonEscape(const std::string& s) {
-    std::ostringstream o;
-    for (auto c = s.cbegin(); c != s.cend(); c++) {
-        if (*c == '"' || *c == '\\' || ('\x00' <= *c && *c <= '\x1f')) {
-            o << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(*c);
-        } else {
-            o << *c;
-        }
-    }
-    return o.str();
-}
+// Helper functions for AIGER literal conversion and clause processing
 
 // Convert state variable name and value to AIGER literal
 unsigned int stateToAigerLiteral(const std::string& state_var, bool is_true, int num_inputs) {
@@ -218,6 +211,7 @@ void printHelpMessage(const char * argv0)
   std::cout << "  -c clauses.cnf : generate clauses corresponding to the CTIs" << std::endl;
   std::cout << "  -m mapping.json : generate mapping between CTI clauses and invariant clauses (requires -f)" << std::endl;
   std::cout << "  -i frame.cnf output.cnf : filter clauses in the frame" << std::endl;
+  std::cout << "  -v : verbose mode, show detailed CTI information" << std::endl;
   std::cout << "  -h, --help : print this help message" << std::endl;
 }
 
@@ -234,6 +228,7 @@ int main(int argc, char ** argv) {
   bool generate_clauses = false;
   bool generate_mapping = false;
   bool require_inv_file = false;
+  bool verbose_mode = false;
 
   try
   {
@@ -267,6 +262,8 @@ int main(int argc, char ** argv) {
         mapping_output = argv[++idx];
         generate_mapping = true;
         require_inv_file = true;
+      } else if (arg == "-v") {
+        verbose_mode = true;
       } else if (arg.find("-") == 0) {
         // Unknown option
         std::cout << "Unknown option: " << arg << std::endl;
@@ -369,15 +366,8 @@ int main(int argc, char ** argv) {
     if ((generate_clauses || generate_mapping) && ret > 0) {
       ClauseBuf cti_clauses;
       
-      // Use map to store mapping relationship
-      std::map<std::string, std::vector<std::string>> mapping;
-      
-      // For storing all CTI clauses and INV clauses set representations, avoid recalculation
-      std::map<std::string, std::set<int>> cti_clause_sets;
+      // For storing INV clauses set representations, avoid recalculation
       std::map<std::string, std::set<int>> inv_clause_sets;
-      
-      // For keeping the minimal subset for each CTI
-      std::map<std::string, std::vector<std::pair<std::string, size_t>>> min_subsets;
       
       // Map for storing human-readable CTI to inv clause mapping
       std::map<std::string, std::vector<std::string>> human_readable_mapping;
@@ -468,69 +458,7 @@ int main(int argc, char ** argv) {
           
           cti_clauses.clauses.push_back(clause);
           
-          // If mapping generation is needed, add this clause to the mapping
-          if (generate_mapping) {
-            // Convert clause to string representation for use as key in the mapping
-            std::string clause_str;
-            for (size_t i = 0; i < clause.size(); i++) {
-              if (i > 0) clause_str += " ";
-              clause_str += std::to_string(clause[i]);
-            }
-            
-            // Use CTI state string as the key in mapping instead of clause_str
-            std::string mapping_key = cti_state_str;
-            
-            // Calculate CTI clause set representation
-            std::set<int> cti_set = clauseToSet(clause);
-            cti_clause_sets[clause_str] = cti_set;
-            
-            // Initialize minimal subset record
-            min_subsets[clause_str] = std::vector<std::pair<std::string, size_t>>();
-            
-            // Bottom-up matching: find inv clauses that are subsets of variables in CTI clause
-            // Stop at the first match (scanning from bottom up)
-            bool match_found = false;
-            for (int i = inv_clauses.size() - 1; i >= 0 && !match_found; i--) {
-              const auto& inv_clause = inv_clauses[i];
-              const auto& inv_clause_str = inv_clauses_str[i];
-              
-              // Check with original set-based check
-              if (isSubset(inv_clause_sets[inv_clause_str], cti_set)) {
-                // Found subset, record it and stop searching
-                min_subsets[clause_str].push_back(std::make_pair(inv_clause_str, inv_clause_sets[inv_clause_str].size()));
-                match_found = true;
-              }
-              // Additional check with polarity if no match found yet
-              else if (!match_found && isClauseSubsetWithPolarity(inv_clause, clause)) {
-                // Found subset considering polarity, record it and stop searching
-                min_subsets[clause_str].push_back(std::make_pair(inv_clause_str, inv_clause.size()));
-                match_found = true;
-              }
-            }
-            
-            // If subsets found, include all valid subsets, not just the smallest ones
-            if (!min_subsets[clause_str].empty()) {
-              // Sort by size for consistency (smaller clauses first)
-              std::sort(min_subsets[clause_str].begin(), min_subsets[clause_str].end(), 
-                  [](const std::pair<std::string, size_t>& a, const std::pair<std::string, size_t>& b) {
-                    return a.second < b.second;
-                  });
-              
-              // Include all valid subsets, not just the smallest ones
-              std::vector<std::string> valid_subsets;
-              for (const auto& subset : min_subsets[clause_str]) {
-                valid_subsets.push_back(subset.first);
-              }
-              
-              // Update mapping with all valid subsets, using CTI state string as key
-              mapping[mapping_key] = valid_subsets;
-              
-              // Also update human-readable mapping
-              human_readable_mapping[human_readable_cti] = valid_subsets;
-              
-              std::cout << "Mapped CTI: " << human_readable_cti << " to clause: " << valid_subsets[0] << std::endl;
-            }
-          }
+          // No first-stage mapping here, it will be done in the second stage
         }
       }
       
@@ -544,8 +472,8 @@ int main(int argc, char ** argv) {
       if (generate_mapping) {
         std::ofstream json_file(mapping_output);
         if (json_file.is_open()) {
-          // Create mapping with actual AIGER latch IDs as keys
-          std::map<std::string, std::vector<std::string>> formatted_mapping;
+          // Single consolidated mapping with actual AIGER latch IDs as keys
+          std::map<std::string, std::vector<std::string>> mapping_result;
           
           // Process each CTI model
           for (const auto& model : m) {
@@ -612,51 +540,47 @@ int main(int argc, char ** argv) {
                 }
               }
               
-              // Print human-readable debugging information
-              std::cout << "CTI: " << human_readable_cti << std::endl;
-              std::cout << "AIGER literals: ";
-              for (unsigned int lit : aiger_literals) {
-                std::cout << lit << " ";
-              }
-              std::cout << std::endl;
-              
               // Find matching invariant clause without flipping literals
               matching_inv = findMatchingInvClause(aiger_literals, inv_clauses, inv_clauses_str);
               
+              // Only print detailed CTI information in verbose mode
+              if (verbose_mode) {
+                std::cout << "CTI: " << human_readable_cti << std::endl;
+                std::cout << "AIGER literals: ";
+                for (unsigned int lit : aiger_literals) {
+                  std::cout << lit << " ";
+                }
+                std::cout << std::endl;
+                
+                if (!matching_inv.empty()) {
+                  std::cout << "  MATCH FOUND! Clause " << matching_inv << " conflicts with CTI" << std::endl;
+                }
+              }
+              
               if (!matching_inv.empty()) {
                 match_found = true;
-                std::cout << "  MATCH FOUND! Clause " << matching_inv << " conflicts with CTI" << std::endl;
               }
               
               if (match_found) {
                 std::vector<std::string> mapped_invs;
                 mapped_invs.push_back(matching_inv);
-                formatted_mapping[aiger_key] = mapped_invs;
+                mapping_result[aiger_key] = mapped_invs;
               }
             }
           }
           
-          // Write out the formatted mapping
-          json_file << "{\n";
+          // Create a JSON object using nlohmann/json
+          json j;
           
-          size_t count = 0;
-          for (const auto& map_entry : formatted_mapping) {
-            json_file << "  \"" << jsonEscape(map_entry.first) << "\": [";
-            for (size_t i = 0; i < map_entry.second.size(); i++) {
-              if (i > 0) json_file << ", ";
-              json_file << "\"" << jsonEscape(map_entry.second[i]) << "\"";
-            }
-            json_file << "]";
-            
-            if (++count < formatted_mapping.size()) {
-              json_file << ",";
-            }
-            json_file << "\n";
+          // Convert the mapping to JSON format
+          for (const auto& map_entry : mapping_result) {
+            j[map_entry.first] = map_entry.second;
           }
           
-          json_file << "}\n";
+          // Write it to the file with pretty printing (indentation)
+          json_file << j.dump(2);
           json_file.close();
-          std::cout << "Wrote mapping of " << formatted_mapping.size() << " CTI clauses to invariant clause subsets in " << mapping_output << std::endl;
+          std::cout << "Wrote mapping of " << mapping_result.size() << " CTI clauses to invariant clause subsets in " << mapping_output << std::endl;
         } else {
           std::cerr << "Failed to open JSON mapping file for writing: " << mapping_output << std::endl;
         }
