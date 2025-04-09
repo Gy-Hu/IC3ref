@@ -240,33 +240,32 @@ int main(int argc, char ** argv) {
         for (size_t i = 0; i < model.vars.size(); i++) {
           // Get variable ID (assuming it's a number in the variable name)
           std::string var_name = model.vars[i]->to_string();
-          int var_id = 0;
           
           // Extract numeric ID from variable name
           if (var_name.find("state") == 0) {
-            var_id = std::stoi(var_name.substr(5));
+            int state_idx = std::stoi(var_name.substr(5));
             
-            // Add to state variables and values arrays
+            // Add to state variables and values arrays for display
             state_vars.push_back(var_name);
             state_vals.push_back(model.vals[i]->to_string() == "true" ? "1" : "0");
-          } else if (var_name.find("v") == 0) {
-            var_id = std::stoi(var_name.substr(1));
+            
+            // Skip if not a valid state variable
+            if (state_idx >= aig->num_latches) continue;
+            
+            // Calculate AIGER latch literal (even number for positive)
+            unsigned int aiger_latch_id = 2 * (1 + aig->num_inputs + state_idx);
+            
+            // Determine if the variable is true or false in the model
+            bool is_true = (model.vals[i]->to_string() == "true");
+            
+            // Apply De Morgan's Law: negate each literal in the cube to form a clause
+            // ¬(a ∧ b ∧ c) = ¬a ∨ ¬b ∨ ¬c
+            // If variable is true in the CTI (cube), it should be false in the clause (opposite polarity)
+            // If variable is false in the CTI (cube), it should be true in the clause (opposite polarity)
+            // For AIGER literals: even numbers (like 36) are positive, odd numbers (like 37) are negative
+            unsigned int clause_literal = is_true ? (aiger_latch_id + 1) : aiger_latch_id;
+            clause.push_back(clause_literal);
           }
-          
-          // Skip if var_id is 0
-          if (var_id == 0) continue;
-          
-          // Determine if the variable is true or false in the model
-          bool is_true = false;
-          if (model.vals[i]->to_string() == "true") {
-            is_true = true;
-          }
-          
-          // Apply De Morgan's Law: negate each literal in the cube to form a clause
-          // ¬(a ∧ b ∧ c) = ¬a ∨ ¬b ∨ ¬c
-          // If variable is true in the CTI (cube), it should be false in the clause
-          // If variable is false in the CTI (cube), it should be true in the clause
-          clause.push_back(is_true ? var_id+1 : var_id);
         }
         
         // Construct the CTI string in the format shown in the console output
