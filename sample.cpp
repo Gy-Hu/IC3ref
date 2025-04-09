@@ -18,6 +18,8 @@ extern "C" {
 #include "aiger.h"
 }
 
+// Helper functions for AIGER literal conversion and clause processing
+
 // Simple JSON string escape function
 std::string jsonEscape(const std::string& s) {
     std::ostringstream o;
@@ -29,6 +31,83 @@ std::string jsonEscape(const std::string& s) {
         }
     }
     return o.str();
+}
+
+// Convert state variable name and value to AIGER literal
+unsigned int stateToAigerLiteral(const std::string& state_var, bool is_true, int num_inputs) {
+    // Extract state index from state variable name (e.g., "state14" -> 14)
+    int state_idx = std::stoi(state_var.substr(5));
+    
+    // Calculate AIGER latch literal
+    unsigned int aiger_latch_id = 2 * (1 + num_inputs + state_idx);
+    
+    // Apply polarity based on value:
+    // If state is true (1), use even number (positive literal)
+    // If state is false (0), use odd number (negative literal)
+    return is_true ? aiger_latch_id : aiger_latch_id + 1;
+}
+
+// Get AIGER literal with opposite polarity
+unsigned int flipAigerLiteral(unsigned int lit) {
+    return lit ^ 1; // XOR with 1 flips the last bit (even <-> odd)
+}
+
+// Convert CTI model to a vector of AIGER literals
+std::vector<unsigned int> ctiModelToAigerLiterals(const ctiModel& model, int num_inputs, int num_latches) {
+    std::vector<unsigned int> aiger_literals;
+    
+    for (size_t i = 0; i < model.vars.size(); i++) {
+        std::string var_name = model.vars[i]->to_string();
+        bool is_true = (model.vals[i]->to_string() == "true");
+        
+        // Only process state variables
+        if (var_name.find("state") == 0) {
+            int state_idx = std::stoi(var_name.substr(5));
+            
+            // Skip if not a valid state variable
+            if (state_idx >= num_latches) continue;
+            
+            // Calculate and add AIGER literal
+            unsigned int aiger_literal = stateToAigerLiteral(var_name, is_true, num_inputs);
+            aiger_literals.push_back(aiger_literal);
+        }
+    }
+    
+    // Sort literals for consistent representation
+    std::sort(aiger_literals.begin(), aiger_literals.end());
+    return aiger_literals;
+}
+
+// Generate a human-readable string representation of a CTI model
+std::string ctiModelToString(const ctiModel& model) {
+    std::string result;
+    std::vector<std::string> state_vars;
+    std::vector<std::string> state_vals;
+    
+    for (size_t i = 0; i < model.vars.size(); i++) {
+        std::string var_name = model.vars[i]->to_string();
+        bool is_true = (model.vals[i]->to_string() == "true");
+        
+        if (var_name.find("state") == 0) {
+            state_vars.push_back(var_name);
+            state_vals.push_back(is_true ? "1" : "0");
+        }
+    }
+    
+    // Format state variable names
+    for (size_t i = 0; i < state_vars.size(); i++) {
+        if (i > 0) result += " ";
+        result += state_vars[i];
+    }
+    result += "\n";
+    
+    // Format state values
+    for (size_t i = 0; i < state_vals.size(); i++) {
+        if (i > 0) result += "       ";
+        result += state_vals[i];
+    }
+    
+    return result;
 }
 
 // Convert clause to integer set for subset checking
@@ -43,6 +122,28 @@ std::set<int> clauseToSet(const std::vector<int>& clause) {
 // Check if one set is a subset of another
 bool isSubset(const std::set<int>& subset, const std::set<int>& superset) {
     return std::includes(superset.begin(), superset.end(), subset.begin(), subset.end());
+}
+
+// Check if inv clause conflicts with CTI state (all literals contradict)
+bool clauseConflictsWithCTI(const std::vector<int>& inv_clause, 
+                             const std::vector<unsigned int>& aiger_literals,
+                             const std::vector<unsigned int>& flipped_literals) {
+    // A clause conflicts with a CTI if all literals in the clause 
+    // contradict the corresponding state values in the CTI
+    for (int lit : inv_clause) {
+        // If a literal from inv is in aiger_literals (not flipped), then it doesn't contradict
+        if (std::find(aiger_literals.begin(), aiger_literals.end(), lit) != aiger_literals.end()) {
+            return false;
+        }
+        
+        // If a literal from inv is not in flipped_literals, it means it
+        // refers to a variable not in the CTI, so no contradiction
+        if (std::find(flipped_literals.begin(), flipped_literals.end(), lit) == flipped_literals.end()) {
+            return false;
+        }
+    }
+    
+    return true;
 }
 
 // Check if inv clause literals are subset of CTI clause literals with polarity consideration
@@ -78,15 +179,60 @@ size_t clauseSize(const std::string& clause_str) {
     return count;
 }
 
-void printHelpMessage (const char * argv0) {
-    std::cout << "Usage: " << argv0 << "[options] aiger\n" ;
-    std::cout << "Options: \n" ;
-    std::cout << "          -f inv.cnf : load frame for cex sampling\n" ;
-    std::cout << "          -g graph   : dump graph to graph \n" ;
-    std::cout << "          -i in.cnf out.cnf: load frame for filtering \n" ;
-    std::cout << "          -c output.cnf : generate CTIs and corresponding clauses\n" ;
-    std::cout << "          -m mapping.json : generate mapping from CTI clauses to invariant clauses\n" ;
-    std::cout << "          -h : print help message \n" ;
+// Find matching invariant clause for a CTI
+std::string findMatchingInvClause(const std::vector<unsigned int>& aiger_literals,
+                               const std::vector<unsigned int>& flipped_literals,
+                               const std::vector<std::vector<int>>& inv_clauses,
+                               const std::vector<std::string>& inv_clauses_str) {
+    std::string matching_inv = "";
+    bool match_found = false;
+    
+    // First try direct conflict approach
+    for (size_t i = 0; i < inv_clauses.size() && !match_found; i++) {
+        const auto& inv_clause = inv_clauses[i];
+        const auto& inv_clause_str = inv_clauses_str[i];
+        
+        if (clauseConflictsWithCTI(inv_clause, aiger_literals, flipped_literals)) {
+            matching_inv = inv_clause_str;
+            match_found = true;
+        }
+    }
+    
+    // If no direct conflict found, try the subset approach
+    if (!match_found) {
+        for (size_t i = 0; i < inv_clauses.size() && !match_found; i++) {
+            const auto& inv_clause = inv_clauses[i];
+            const auto& inv_clause_str = inv_clauses_str[i];
+            
+            // Check if all literals in inv clause are in flipped_literals
+            bool is_subset = true;
+            for (int lit : inv_clause) {
+                if (std::find(flipped_literals.begin(), flipped_literals.end(), lit) == flipped_literals.end()) {
+                    is_subset = false;
+                    break;
+                }
+            }
+            
+            if (is_subset) {
+                matching_inv = inv_clause_str;
+                match_found = true;
+            }
+        }
+    }
+    
+    return matching_inv;
+}
+
+void printHelpMessage(const char * argv0)
+{
+  std::cout << "Usage: " << argv0 << " OPTIONS input.aig" << std::endl;
+  std::cout << "  -s : sample cex from the aig" << std::endl;
+  std::cout << "  -f inv.cnf : provide invariant file (required only for mapping)" << std::endl;
+  std::cout << "  -g graph.dot : dump aig to graph" << std::endl;
+  std::cout << "  -c clauses.cnf : generate clauses corresponding to the CTIs" << std::endl;
+  std::cout << "  -m mapping.json : generate mapping between CTI clauses and invariant clauses (requires -f)" << std::endl;
+  std::cout << "  -i frame.cnf output.cnf : filter clauses in the frame" << std::endl;
+  std::cout << "  -h, --help : print this help message" << std::endl;
 }
 
 int main(int argc, char ** argv) {
@@ -101,44 +247,77 @@ int main(int argc, char ** argv) {
   bool filtering_frame = false;
   bool generate_clauses = false;
   bool generate_mapping = false;
+  bool require_inv_file = false;
 
-  if (argc > 1) {
-    int idx = 1;
-    for (; idx < argc - 1 ; ++ idx) {
-      if(argv[idx] == std::string("-f")) {
-        framebuf = argv[++idx];
-        sampling_cex = true;
-      } else if (argv[idx] == std::string("-g"))
-        dump_graph = argv[++idx];
-      else if (argv[idx] == std::string("-i")) {
-        framebuf = argv[++idx];
-        outframebuf = argv[++idx];
-        filtering_frame = true;
-      }
-      else if (argv[idx] == std::string("-c")) {
-        clause_output = argv[++idx];
-        generate_clauses = true;
-      }
-      else if (argv[idx] == std::string("-m")) {
-        mapping_output = argv[++idx];
-        generate_mapping = true;
-      }
-      else if (argv[idx] == std::string("-h")) {
+  try
+  {
+    // Check for standalone help options first
+    for (int i = 1; i < argc; i++) {
+      if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
         printHelpMessage(argv[0]);
         return 0;
       }
-      else {
-        std::cout << "unknown option:" << argv[idx] << std::endl;
+    }
+    
+    int idx = 1;
+    while (idx < argc) {
+      std::string arg = argv[idx];
+      if (arg == "-s") {
+        sampling_cex = true;
+      } else if (arg == "-f" && idx + 1 < argc) {
+        framebuf = argv[++idx];
+        // Setting framebuf doesn't automatically mean we're sampling
+        // We only set sampling_cex explicitly with -s option
+      } else if (arg == "-g" && idx + 1 < argc) {
+        dump_graph = argv[++idx];
+      } else if (arg == "-i" && idx + 2 < argc) {
+        framebuf = argv[++idx];
+        outframebuf = argv[++idx];
+        filtering_frame = true;
+      } else if (arg == "-c" && idx + 1 < argc) {
+        clause_output = argv[++idx];
+        generate_clauses = true;
+      } else if (arg == "-m" && idx + 1 < argc) {
+        mapping_output = argv[++idx];
+        generate_mapping = true;
+        require_inv_file = true;
+      } else if (arg.find("-") == 0) {
+        // Unknown option
+        std::cout << "Unknown option: " << arg << std::endl;
         printHelpMessage(argv[0]);
-        return 1;
+        return -1;
+      } else {
+        // Not an option, should be the input filename
+        if (fname == NULL) {
+          fname = argv[idx];
+        } else {
+          std::cout << "Too many input files specified" << std::endl;
+          printHelpMessage(argv[0]);
+          return -1;
+        }
       }
+      idx++;
     }
-    if (idx != argc - 1) {
+    
+    // Check if a filename was provided (required unless help was requested)
+    if (fname == NULL) {
+      std::cout << "Error: No input file specified" << std::endl;
       printHelpMessage(argv[0]);
-      return 1;
+      return -1;
     }
-    fname = argv[argc-1];
-  } else {
+    
+    // Check if invariant file is required but not provided
+    if (require_inv_file && framebuf == NULL) {
+      std::cout << "Error: Invariant file (-f) is required for mapping operations" << std::endl;
+      printHelpMessage(argv[0]);
+      return -1;
+    }
+    
+    // If sampling is requested but not explicitly set via -s, enable it
+    if (!sampling_cex && (generate_clauses || generate_mapping)) {
+      sampling_cex = true;
+    }
+  } catch (...) {
     printHelpMessage(argv[0]);
     return 1;
   }
@@ -196,7 +375,7 @@ int main(int argc, char ** argv) {
     std::cout << "Number of latches in this model: " << aig->num_latches << std::endl;
     std::cout << "============================================" << std::endl;
     
-    auto ret = sample_cti(ts, 100, m);
+    auto ret = sample_cti(ts, 1000, m);
     std::cout << "Total samples: "<< ret << std::endl;
     // sample model: P /\ T /\ neg P'
     
@@ -242,59 +421,48 @@ int main(int argc, char ** argv) {
       
       // Generate clauses from CTI models
       for (const auto& model : m) {
-        // Vector to store AIGER latch literals - using same logic as in mapping generation
-        std::vector<unsigned int> aiger_literals;
+        // Get the AIGER literals and string representation using helper functions
+        std::vector<unsigned int> aiger_literals = ctiModelToAigerLiterals(model, aig->num_inputs, aig->num_latches);
+        std::string cti_state_str = ctiModelToString(model);
         
-        // Create a string representation of the CTI in original state format
-        std::string cti_state_str;
+        // Parse the CTI state string to get state variables and values
         std::vector<std::string> state_vars;
         std::vector<std::string> state_vals;
         
-        // For human-readable CTI representation
-        std::string human_readable_cti;
+        // Split cti_state_str into lines
+        size_t pos = cti_state_str.find('\n');
+        if (pos != std::string::npos) {
+          // First line contains state variables
+          std::string vars_line = cti_state_str.substr(0, pos);
+          std::string vals_line = cti_state_str.substr(pos + 1);
+          
+          // Parse variables
+          std::stringstream vars_ss(vars_line);
+          std::string var;
+          while (vars_ss >> var) {
+            state_vars.push_back(var);
+          }
+          
+          // Parse values
+          std::stringstream vals_ss(vals_line);
+          std::string val;
+          while (vals_ss >> val) {
+            state_vals.push_back(val);
+          }
+        }
         
+        // Create human-readable representation
+        std::string human_readable_cti;
         for (size_t i = 0; i < model.vars.size(); i++) {
           std::string var_name = model.vars[i]->to_string();
           bool is_true = (model.vals[i]->to_string() == "true");
           
-          // Add to state variables and values arrays for display
           if (var_name.find("state") == 0) {
-            state_vars.push_back(var_name);
-            state_vals.push_back(is_true ? "1" : "0");
-          }
-          
-          // Map the state variable to its corresponding AIGER latch literal
-          if (var_name.find("state") == 0) {
-            // Extract state index
-            int state_idx = std::stoi(var_name.substr(5));
-            
-            // Skip if not a valid state variable
-            if (state_idx >= aig->num_latches) continue;
-            
-            // Calculate AIGER latch literal (even number for positive)
-            unsigned int aiger_latch_id = 2 * (1 + aig->num_inputs + state_idx);
-            
-            // Apply polarity based on state value - same logic as in mapping
-            // If state is true (1), use even number (positive literal)
-            // If state is false (0), use odd number (negative literal) 
-            unsigned int aiger_literal = is_true ? aiger_latch_id : aiger_latch_id + 1;
-            
-            // Removed detailed conversion prints
-            
-            // Add to our list of literals for this CTI
-            aiger_literals.push_back(aiger_literal);
-            
-            // Add to human-readable CTI representation
             if (!human_readable_cti.empty()) human_readable_cti += " ";
             human_readable_cti += var_name + "=" + (is_true ? "1" : "0");
           }
         }
         
-        // Construct the CTI string in the format shown in the console output
-        for (size_t i = 0; i < state_vars.size(); i++) {
-          if (i > 0) cti_state_str += " ";
-          cti_state_str += state_vars[i];
-        }
         cti_state_str += "\n";
         for (size_t i = 0; i < state_vals.size(); i++) {
           if (i > 0) cti_state_str += "       ";
@@ -315,7 +483,7 @@ int main(int argc, char ** argv) {
           cti_clauses.clauses.push_back(clause);
           
           // If mapping generation is needed, add this clause to the mapping
-          if (generate_mapping && framebuf != NULL) {
+          if (generate_mapping) {
             // Convert clause to string representation for use as key in the mapping
             std::string clause_str;
             for (size_t i = 0; i < clause.size(); i++) {
@@ -421,16 +589,9 @@ int main(int argc, char ** argv) {
                 int state_idx = std::stoi(var_name.substr(5));
                 
                 // Check if it's a valid state variable
-                if (state_idx < aig->num_latches) {
-                  // Calculate AIGER latch literal (even number for positive)
-                  unsigned int aiger_latch_id = 2 * (1 + aig->num_inputs + state_idx);
-                  
-                  // Apply polarity based on state value:
-                  // If state is false (0), use odd number (negative literal)
-                  // If state is true (1), use even number (positive literal)
-                  unsigned int aiger_literal = is_true ? aiger_latch_id : aiger_latch_id + 1;
-                  
-                  // Removed detailed conversion prints
+                if (state_idx < static_cast<int>(aig->num_latches)) {
+                  // Use helper function to get the AIGER literal
+                  unsigned int aiger_literal = stateToAigerLiteral(var_name, is_true, aig->num_inputs);
                   
                   // Add to our list of literals for this CTI
                   aiger_literals.push_back(aiger_literal);
@@ -449,86 +610,50 @@ int main(int argc, char ** argv) {
             }
             
             // Find match in invariant clauses (scanning from bottom up)
-            if (generate_mapping && framebuf != NULL && !aiger_literals.empty()) {
+            if (generate_mapping && !aiger_literals.empty()) {
               bool match_found = false;
               std::string matching_inv = "";
               
-              // First, we need to flip the CTI literals to get the clause that blocks this CTI
+              // Flip the CTI literals to get the clause that blocks this CTI
               // According to De Morgan's law: ~(a & b & c) = ~a | ~b | ~c
               std::vector<unsigned int> flipped_literals;
               for (unsigned int lit : aiger_literals) {
-                // Flip each literal: even becomes odd, odd becomes even
-                flipped_literals.push_back(lit ^ 1); // XOR with 1 flips the last bit
+                flipped_literals.push_back(flipAigerLiteral(lit));
               }
-              
-              // Sort the flipped literals
               std::sort(flipped_literals.begin(), flipped_literals.end());
               
-              // Construct a human-readable CTI state representation for debugging
-              std::string cti_human_readable = "CTI: ";
+              // Create human-readable CTI representation for debugging
+              std::string human_readable_cti;
               for (size_t i = 0; i < model.vars.size(); i++) {
                 std::string var_name = model.vars[i]->to_string();
                 bool is_true = (model.vals[i]->to_string() == "true");
                 
                 if (var_name.find("state") == 0) {
-                  if (cti_human_readable.length() > 5) cti_human_readable += ", ";
-                  cti_human_readable += var_name + "=" + (is_true ? "1" : "0");
+                  if (!human_readable_cti.empty()) human_readable_cti += " ";
+                  human_readable_cti += var_name + "=" + (is_true ? "1" : "0");
                 }
               }
-              std::cout << cti_human_readable << std::endl;
               
-              // Print the corresponding AIGER literals for debugging
+              // Print human-readable debugging information
+              std::cout << "CTI: " << human_readable_cti << std::endl;
               std::cout << "AIGER literals: ";
               for (unsigned int lit : aiger_literals) {
                 std::cout << lit << " ";
               }
               std::cout << std::endl;
               
-              // Print the flipped literals that would block this CTI
               std::cout << "Flipped (blocking) literals: ";
               for (unsigned int lit : flipped_literals) {
                 std::cout << lit << " ";
               }
               std::cout << std::endl;
               
-              // Now check which invariant clause conflicts with this CTI
-              // For each invariant clause, check if it conflicts with the CTI state
-              for (int i = 0; i < inv_clauses.size() && !match_found; i++) {
-                const auto& inv_clause = inv_clauses[i];
-                const auto& inv_clause_str = inv_clauses_str[i];
-                
-                // Check if the invariant clause conflicts with the CTI
-                // A clause conflicts with a CTI if all literals in the clause 
-                // contradict the corresponding state values in the CTI
-                bool clause_conflicts = true;
-                
-                // std::cout << "Testing inv clause: " << inv_clause_str << std::endl;
-                
-                // For each literal in inv clause, check if it contradicts the CTI state
-                for (int lit : inv_clause) {
-                  // For each literal, check if it's in the aiger_literals (not flipped)
-                  // If a literal from inv is in aiger_literals, then it doesn't contradict
-                  if (std::find(aiger_literals.begin(), aiger_literals.end(), lit) != aiger_literals.end()) {
-                    clause_conflicts = false;
-                    // std::cout << "  Literal " << lit << " matches CTI state, no conflict" << std::endl;
-                    break;
-                  }
-                  
-                  // If a literal from inv is not in flipped_literals, it means it
-                  // refers to a variable not in the CTI, so no contradiction
-                  if (std::find(flipped_literals.begin(), flipped_literals.end(), lit) == flipped_literals.end()) {
-                    clause_conflicts = false;
-                    // std::cout << "  Literal " << lit << " not in CTI variables" << std::endl;
-                    break;
-                  }
-                }
-                
-                if (clause_conflicts) {
-                  matching_inv = inv_clause_str;
-                  match_found = true;
-                  std::cout << "  MATCH FOUND! Clause " << inv_clause_str 
-                            << " conflicts with CTI" << std::endl;
-                }
+              // Find matching invariant clause
+              matching_inv = findMatchingInvClause(aiger_literals, flipped_literals, inv_clauses, inv_clauses_str);
+              
+              if (!matching_inv.empty()) {
+                match_found = true;
+                std::cout << "  MATCH FOUND! Clause " << matching_inv << " conflicts with CTI" << std::endl;
               }
               
               if (match_found) {
