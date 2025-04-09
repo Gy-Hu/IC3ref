@@ -230,24 +230,28 @@ int main(int argc, char ** argv) {
       
       // Generate clauses from CTI models
       for (const auto& model : m) {
-        // Extract literals from the model and create a clause
-        std::vector<int> clause;
+        // Vector to store AIGER latch literals - using same logic as in mapping generation
+        std::vector<unsigned int> aiger_literals;
+        
         // Create a string representation of the CTI in original state format
         std::string cti_state_str;
         std::vector<std::string> state_vars;
         std::vector<std::string> state_vals;
         
         for (size_t i = 0; i < model.vars.size(); i++) {
-          // Get variable ID (assuming it's a number in the variable name)
           std::string var_name = model.vars[i]->to_string();
+          bool is_true = (model.vals[i]->to_string() == "true");
           
-          // Extract numeric ID from variable name
+          // Add to state variables and values arrays for display
           if (var_name.find("state") == 0) {
-            int state_idx = std::stoi(var_name.substr(5));
-            
-            // Add to state variables and values arrays for display
             state_vars.push_back(var_name);
-            state_vals.push_back(model.vals[i]->to_string() == "true" ? "1" : "0");
+            state_vals.push_back(is_true ? "1" : "0");
+          }
+          
+          // Map the state variable to its corresponding AIGER latch literal
+          if (var_name.find("state") == 0) {
+            // Extract state index
+            int state_idx = std::stoi(var_name.substr(5));
             
             // Skip if not a valid state variable
             if (state_idx >= aig->num_latches) continue;
@@ -255,16 +259,13 @@ int main(int argc, char ** argv) {
             // Calculate AIGER latch literal (even number for positive)
             unsigned int aiger_latch_id = 2 * (1 + aig->num_inputs + state_idx);
             
-            // Determine if the variable is true or false in the model
-            bool is_true = (model.vals[i]->to_string() == "true");
+            // Apply polarity based on state value - same logic as in mapping
+            // If state is true (1), use even number (positive literal)
+            // If state is false (0), use odd number (negative literal) 
+            unsigned int aiger_literal = is_true ? aiger_latch_id : aiger_latch_id + 1;
             
-            // Apply De Morgan's Law: negate each literal in the cube to form a clause
-            // ¬(a ∧ b ∧ c) = ¬a ∨ ¬b ∨ ¬c
-            // If variable is true in the CTI (cube), it should be false in the clause (opposite polarity)
-            // If variable is false in the CTI (cube), it should be true in the clause (opposite polarity)
-            // For AIGER literals: even numbers (like 36) are positive, odd numbers (like 37) are negative
-            unsigned int clause_literal = is_true ? (aiger_latch_id + 1) : aiger_latch_id;
-            clause.push_back(clause_literal);
+            // Add to our list of literals for this CTI
+            aiger_literals.push_back(aiger_literal);
           }
         }
         
@@ -279,8 +280,17 @@ int main(int argc, char ** argv) {
           cti_state_str += state_vals[i];
         }
         
-        // Add clause if not empty
-        if (!clause.empty()) {
+        // Add clause if not empty - use the same literals as in mapping.json keys
+        if (!aiger_literals.empty()) {
+          // Sort literals to ensure consistency
+          std::sort(aiger_literals.begin(), aiger_literals.end());
+          
+          // Convert to a regular clause format
+          std::vector<int> clause;
+          for (unsigned int lit : aiger_literals) {
+            clause.push_back(lit);
+          }
+          
           cti_clauses.clauses.push_back(clause);
           
           // If mapping generation is needed, add this clause to the mapping
@@ -410,36 +420,35 @@ int main(int argc, char ** argv) {
               bool match_found = false;
               std::string matching_inv = "";
               
+              // First, we need to flip the CTI literals to get the clause that blocks this CTI
+              // According to De Morgan's law: ~(a & b & c) = ~a | ~b | ~c
+              std::vector<unsigned int> flipped_literals;
+              for (unsigned int lit : aiger_literals) {
+                // Flip each literal: even becomes odd, odd becomes even
+                flipped_literals.push_back(lit ^ 1); // XOR with 1 flips the last bit
+              }
+              
+              // Sort the flipped literals
+              std::sort(flipped_literals.begin(), flipped_literals.end());
+              
+              // Now find invariant clauses that are true subsets of this flipped clause
               // Scan invariant clauses from bottom to top
               for (int i = inv_clauses.size() - 1; i >= 0 && !match_found; i--) {
                 const auto& inv_clause = inv_clauses[i];
                 const auto& inv_clause_str = inv_clauses_str[i];
                 
-                // Check if this invariant clause is a subset of the CTI literals
-                // A clause is a subset if all its literals appear in the CTI
-                // Ignoring polarity: both 2n and 2n+1 are considered the same variable
+                // Check if this invariant clause is a true subset of the flipped CTI literals
                 bool is_subset = true;
+                // All invariant literals must be in flipped_literals
                 for (int lit : inv_clause) {
-                  unsigned int lit_base = lit - (lit % 2); // Get the even variant (ignore polarity)
-                  unsigned int lit_neg = lit_base + 1;     // Get the odd variant
-                  
-                  // Check if either variant of the literal exists in CTI literals
-                  bool found_lit = false;
-                  for (unsigned int aiger_lit : aiger_literals) {
-                    unsigned int aiger_base = aiger_lit - (aiger_lit % 2);
-                    if (aiger_base == lit_base) {
-                      found_lit = true;
-                      break;
-                    }
-                  }
-                  
-                  if (!found_lit) {
+                  if (std::find(flipped_literals.begin(), flipped_literals.end(), lit) == flipped_literals.end()) {
                     is_subset = false;
                     break;
                   }
                 }
                 
-                if (is_subset) {
+                // Must be a true subset (not equal)
+                if (is_subset && inv_clause.size() < flipped_literals.size()) {
                   matching_inv = inv_clause_str;
                   match_found = true;
                 }
