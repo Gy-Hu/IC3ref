@@ -181,42 +181,28 @@ size_t clauseSize(const std::string& clause_str) {
 
 // Find matching invariant clause for a CTI
 std::string findMatchingInvClause(const std::vector<unsigned int>& aiger_literals,
-                               const std::vector<unsigned int>& flipped_literals,
                                const std::vector<std::vector<int>>& inv_clauses,
                                const std::vector<std::string>& inv_clauses_str) {
     std::string matching_inv = "";
     bool match_found = false;
     
-    // First try direct conflict approach
+    // Try direct subset approach without flipping literals
     for (size_t i = 0; i < inv_clauses.size() && !match_found; i++) {
         const auto& inv_clause = inv_clauses[i];
         const auto& inv_clause_str = inv_clauses_str[i];
         
-        if (clauseConflictsWithCTI(inv_clause, aiger_literals, flipped_literals)) {
+        // Check if all literals in inv clause are in aiger_literals
+        bool is_subset = true;
+        for (int lit : inv_clause) {
+            if (std::find(aiger_literals.begin(), aiger_literals.end(), lit) == aiger_literals.end()) {
+                is_subset = false;
+                break;
+            }
+        }
+        
+        if (is_subset) {
             matching_inv = inv_clause_str;
             match_found = true;
-        }
-    }
-    
-    // If no direct conflict found, try the subset approach
-    if (!match_found) {
-        for (size_t i = 0; i < inv_clauses.size() && !match_found; i++) {
-            const auto& inv_clause = inv_clauses[i];
-            const auto& inv_clause_str = inv_clauses_str[i];
-            
-            // Check if all literals in inv clause are in flipped_literals
-            bool is_subset = true;
-            for (int lit : inv_clause) {
-                if (std::find(flipped_literals.begin(), flipped_literals.end(), lit) == flipped_literals.end()) {
-                    is_subset = false;
-                    break;
-                }
-            }
-            
-            if (is_subset) {
-                matching_inv = inv_clause_str;
-                match_found = true;
-            }
         }
     }
     
@@ -614,14 +600,6 @@ int main(int argc, char ** argv) {
               bool match_found = false;
               std::string matching_inv = "";
               
-              // Flip the CTI literals to get the clause that blocks this CTI
-              // According to De Morgan's law: ~(a & b & c) = ~a | ~b | ~c
-              std::vector<unsigned int> flipped_literals;
-              for (unsigned int lit : aiger_literals) {
-                flipped_literals.push_back(flipAigerLiteral(lit));
-              }
-              std::sort(flipped_literals.begin(), flipped_literals.end());
-              
               // Create human-readable CTI representation for debugging
               std::string human_readable_cti;
               for (size_t i = 0; i < model.vars.size(); i++) {
@@ -642,14 +620,8 @@ int main(int argc, char ** argv) {
               }
               std::cout << std::endl;
               
-              std::cout << "Flipped (blocking) literals: ";
-              for (unsigned int lit : flipped_literals) {
-                std::cout << lit << " ";
-              }
-              std::cout << std::endl;
-              
-              // Find matching invariant clause
-              matching_inv = findMatchingInvClause(aiger_literals, flipped_literals, inv_clauses, inv_clauses_str);
+              // Find matching invariant clause without flipping literals
+              matching_inv = findMatchingInvClause(aiger_literals, inv_clauses, inv_clauses_str);
               
               if (!matching_inv.empty()) {
                 match_found = true;
