@@ -24,14 +24,19 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #ifndef IC3_h_INCLUDED
 #define IC3_h_INCLUDED
 
+#include <string>
 #include "Model.h"
+
+using namespace std;
 
 namespace IC3 {
 
-  bool check(Model & model, 
+  bool check(Model & model,
              int verbose = 0,       // 0: silent, 1: stats, 2: informative
              bool basic = false,    // simple inductive generalization
-             bool random = false);  // random runs for statistical profiling
+             bool random = false,   // random runs for statistical profiling
+             int feature_extraction_frame_limit = 0, // feature extraction mode
+             const string& output_json_file = ""); // output JSON file
 
 }
 

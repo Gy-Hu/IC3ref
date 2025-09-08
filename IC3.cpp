@@ -23,6 +23,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include <algorithm>
 #include <iostream>
+#include <fstream>
 #include <set>
 #include <sys/times.h>
 
@@ -135,7 +136,10 @@ namespace IC3 {
       litOrder(), slimLitOrder(),
       numLits(0), numUpdates(0), maxDepth(1), maxCTGs(3),
       maxJoins(1<<20), micAttempts(3), cexState(0), nQuery(0), nCTI(0), nCTG(0),
-      nmic(0), satTime(0), nCoreReduced(0), nAbortJoin(0), nAbortMic(0)
+      nmic(0), satTime(0), nCoreReduced(0), nAbortJoin(0), nAbortMic(0),
+      // Initialize new members for feature extraction
+      feature_extraction_frame_limit(0), total_clauses_added(0), total_literals_added(0),
+      output_json_file("")
     {
       slimLitOrder.heuristicLitOrder = &litOrder;
 
@@ -163,6 +167,13 @@ namespace IC3 {
     bool check() {
       startTime = time();  // stats
       while (true) {
+        // ===== FEATURE EXTRACTION EXIT CONDITION =====
+        if (feature_extraction_frame_limit > 0 && k > (size_t)feature_extraction_frame_limit) {
+            printFeaturesAsJson();
+            return true; // Exit gracefully after printing features
+        }
+        // ===========================================
+
         if (verbose > 1) cout << "Level " << k << endl;
         extend();                         // push frontier frame
         if (!strengthen()) return false;  // strengthen to remove bad successors
@@ -641,7 +652,15 @@ namespace IC3 {
       sort(cube.begin(), cube.end());
       pair<CubeSet::iterator, bool> rv = frames[level].borderCubes.insert(cube);
       if (!rv.second) return;
-      if (!silent && verbose > 1) 
+
+      // ===== FEATURE EXTRACTION HOOK =====
+      if (toAll && !silent) { // Count only substantive clauses added by generalization
+          total_clauses_added++;
+          total_literals_added += cube.size();
+      }
+      // ===================================
+
+      if (!silent && verbose > 1)
         cout << level << ": " << stringOfLitVec(cube) << endl;
       earliest = min(earliest, level);
       MSLitVec cls;
@@ -786,6 +805,11 @@ namespace IC3 {
     int nQuery, nCTI, nCTG, nmic;
     clock_t startTime, satTime;
     int nCoreReduced, nAbortJoin, nAbortMic;
+    // New variables for feature extraction
+    int feature_extraction_frame_limit;
+    int total_clauses_added;
+    int total_literals_added;
+    string output_json_file;
     clock_t time() {
       struct tms t;
       times(&t);
@@ -814,7 +838,52 @@ namespace IC3 {
       if (numUpdates) cout << ". Avg lits/cls: " << numLits / numUpdates << endl;
     }
 
-    friend bool check(Model &, int, bool, bool);
+    void printFeaturesAsJson() const {
+        double avg_clause_length = 0.0;
+        if (total_clauses_added > 0) {
+            avg_clause_length = (double)total_literals_added / total_clauses_added;
+        }
+
+        if (output_json_file.empty()) {
+            // Output to stdout if no file specified
+            cout << "{"
+                 << "\"frames_reached\":" << k -1 << ","
+                 << "\"sat_queries\":" << nQuery << ","
+                 << "\"ctis_handled\":" << nCTI << ","
+                 << "\"ctgs_handled\":" << nCTG << ","
+                 << "\"mic_calls\":" << nmic << ","
+                 << "\"total_clauses_added\":" << total_clauses_added << ","
+                 << "\"total_literals_added\":" << total_literals_added << ","
+                 << "\"avg_clause_length\":" << avg_clause_length << ","
+                 << "\"mic_aborts\":" << nAbortMic << ","
+                 << "\"join_aborts\":" << nAbortJoin << ","
+                 << "\"core_reductions\":" << nCoreReduced
+                 << "}" << endl;
+        } else {
+            // Output to specified file
+            ofstream outfile(output_json_file.c_str());
+            if (outfile.is_open()) {
+                outfile << "{"
+                        << "\"frames_reached\":" << k -1 << ","
+                        << "\"sat_queries\":" << nQuery << ","
+                        << "\"ctis_handled\":" << nCTI << ","
+                        << "\"ctgs_handled\":" << nCTG << ","
+                        << "\"mic_calls\":" << nmic << ","
+                        << "\"total_clauses_added\":" << total_clauses_added << ","
+                        << "\"total_literals_added\":" << total_literals_added << ","
+                        << "\"avg_clause_length\":" << avg_clause_length << ","
+                        << "\"mic_aborts\":" << nAbortMic << ","
+                        << "\"join_aborts\":" << nAbortJoin << ","
+                        << "\"core_reductions\":" << nCoreReduced
+                        << "}" << endl;
+                outfile.close();
+            } else {
+                cerr << "Error: Could not open output file " << output_json_file << endl;
+            }
+        }
+    }
+
+    friend bool check(Model &, int, bool, bool, int, const string&);
 
   };
 
@@ -841,11 +910,13 @@ namespace IC3 {
   }
 
   // External function to make the magic happen.
-  bool check(Model & model, int verbose, bool basic, bool random) {
+  bool check(Model & model, int verbose, bool basic, bool random, int feature_extraction_frame_limit, const string& output_json_file) {
     if (!baseCases(model))
       return false;
     IC3 ic3(model);
     ic3.verbose = verbose;
+    ic3.feature_extraction_frame_limit = feature_extraction_frame_limit;
+    ic3.output_json_file = output_json_file;
     if (basic) {
       ic3.maxDepth = 0;
       ic3.maxJoins = 0;
