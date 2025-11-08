@@ -137,7 +137,8 @@ namespace IC3 {
       litOrder(), slimLitOrder(),
       numLits(0), numUpdates(0), maxDepth(1), maxCTGs(3),
       maxJoins(1<<20), micAttempts(3), cexState(0), nQuery(0), nCTI(0), nCTG(0),
-      nmic(0), satTime(0), nCoreReduced(0), nAbortJoin(0), nAbortMic(0)
+      nmic(0), satTime(0), nCoreReduced(0), nAbortJoin(0), nAbortMic(0),
+      cleanupThreshold(25000)
     {
       slimLitOrder.heuristicLitOrder = &litOrder;
 
@@ -335,7 +336,9 @@ namespace IC3 {
     struct Frame {
       size_t k;             // steps from initial state
       CubeSet borderCubes;  // additional cubes in this and previous frames
+      CubeSet globalCubes;  // cubes replicated into earlier frames
       Minisat::Solver * consecution;
+      size_t clauseBudget;
     };
     vector<Frame> frames;
 
@@ -348,6 +351,7 @@ namespace IC3 {
         frames.resize(frames.size()+1);
         Frame & fr = frames.back();
         fr.k = frames.size()-1;
+        fr.clauseBudget = 0;
         fr.consecution = model.newSolver();
         if (random) {
           fr.consecution->random_seed = rand();
@@ -416,6 +420,48 @@ namespace IC3 {
     void orderAssumps(MSLitVec & cube, bool rev, int start = 0) {
       stable_sort(cube + start, cube + cube.size(), slimLitOrder);
       if (rev) reverse(cube + start, cube + cube.size());
+    }
+
+    void addCubeClauseToSolver(Minisat::Solver & slv, const LitVec & cube) {
+      MSLitVec cls;
+      cls.capacity(cube.size());
+      for (LitVec::const_iterator i = cube.begin(); i != cube.end(); ++i)
+        cls.push(~*i);
+      slv.addClause(cls);
+    }
+
+    void rebuildFrameSolver(size_t idx) {
+      Frame & fr = frames[idx];
+      Minisat::Solver * fresh = model.newSolver();
+      if (random) {
+        fresh->random_seed = rand();
+        fresh->rnd_init_act = true;
+      }
+      if (fr.k == 0)
+        model.loadInitialCondition(*fresh);
+      model.loadTransitionRelation(*fresh);
+      size_t clauses = 0;
+      for (size_t level = 1; level <= idx; ++level) {
+        const CubeSet & source = (level == idx)
+          ? frames[level].borderCubes
+          : frames[level].globalCubes;
+        for (CubeSet::const_iterator it = source.begin();
+             it != source.end(); ++it) {
+          addCubeClauseToSolver(*fresh, *it);
+          ++clauses;
+        }
+      }
+      delete fr.consecution;
+      fr.consecution = fresh;
+      fr.clauseBudget = clauses;
+    }
+
+    void addClauseToFrame(size_t idx, const MSLitVec & cls) {
+      Frame & fr = frames[idx];
+      fr.consecution->addClause(cls);
+      ++fr.clauseBudget;
+      if (fr.clauseBudget >= cleanupThreshold)
+        rebuildFrameSolver(idx);
     }
 
     // Assumes that last call to fr.consecution->solve() was
@@ -685,13 +731,14 @@ namespace IC3 {
       if (!rv.second) return;
       if (!silent && verbose > 1) 
         cout << level << ": " << stringOfLitVec(cube) << endl;
+      if (toAll) frames[level].globalCubes.insert(*rv.first);
       earliest = min(earliest, level);
       MSLitVec cls;
       cls.capacity(cube.size());
       for (LitVec::const_iterator i = cube.begin(); i != cube.end(); ++i)
         cls.push(~*i);
       for (size_t i = toAll ? 1 : level; i <= level; ++i)
-        frames[i].consecution->addClause(cls);
+        addClauseToFrame(i, cls);
       if (toAll && !silent) updateLitOrder(cube, level);
     }
 
@@ -806,6 +853,7 @@ namespace IC3 {
             addCube(i+1, core, core.size() < j->size(), true);
             CubeSet::iterator tmp = j;
             ++j;
+            fr.globalCubes.erase(*tmp);
             fr.borderCubes.erase(tmp);
           }
           else {
@@ -830,6 +878,7 @@ namespace IC3 {
     int nQuery, nCTI, nCTG, nmic;
     clock_t startTime, satTime;
     int nCoreReduced, nAbortJoin, nAbortMic;
+    const size_t cleanupThreshold;
     clock_t time() {
       struct tms t;
       times(&t);
